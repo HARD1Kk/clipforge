@@ -1,0 +1,17 @@
+[project]
+name = "clipforge"
+version = "0.1.0"
+description = "Find high-energy moments in live gameplay and render 9:16 clips with word-by-word pop-up captions."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "faster-whisper",
+    "yt-dlp",
+    "requests",
+    "opencv-python-headless>=4.10,<6",
+    "onnxruntime",
+]
+
+[tool.uv]
+package = false

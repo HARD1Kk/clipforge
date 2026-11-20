@@ -1,20 +1,45 @@
+# Environment and Secrets
 .env
+.env.*
 .dev.vars
 .dev.vars.*
 site/.dev.vars
 site/private/
-node_modules/
+private/
+
+# Python & Virtual Environments
+.venv/
 __pycache__/
 *.py[cod]
+*.pyc
+
+# IDEs & OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Downloaded Media & Build Workdirs
 *.mp4
+*.mkv
+*.webm
+*.mp3
+*.wav
 *.ts
 work/
 test_out/
 output/
-*.log
+streams_*.json
+
+# Cookies
+*cookies*.txt
+cookies.txt
+
+# Cloudflare & Node
+node_modules/
 .wrangler/
-.DS_Store
+*.log
 
-private/
-
+# Models
 models/person_yolox_s_2022nov.onnx
