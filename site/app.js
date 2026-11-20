@@ -1,4 +1,4 @@
-﻿const buyButton = document.querySelector('#buy-button');
+const buyButton = document.querySelector('#buy-button');
 const statusLine = document.querySelector('#payment-status');
 document.querySelector('#year').textContent = new Date().getFullYear();
 
@@ -17,7 +17,7 @@ fetch('/api/config').then((response) => response.json()).then((config) => {
   } else {
     buyButton.disabled = true;
     buyButton.textContent = 'Checkout is not active yet';
-    setStatus('Razorpay checkout is not active yet. For purchase help, contact anintellectualcompany.contact@gmail.com.');
+    setStatus('Razorpay checkout is not active yet.');
   }
 }).catch(() => setStatus('Checkout status could not be loaded.', true));
 
