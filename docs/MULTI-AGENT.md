@@ -1,7 +1,6 @@
 # Running several streams, several AI agents and several channels
 
-The clipper makes clips. The [GTA Auto Sender](https://github.com/AnIntellectualBeing/GTA-Auto-Sender) posts them to
-as many YouTube + Instagram channels as you connect and shares the clips equally. This page shows how to run
+The clipper makes clips and posts them to YouTube and Instagram channels. This page shows how to run
 many streams and many AI sessions at the same time without them stepping on each other.
 
 ```
