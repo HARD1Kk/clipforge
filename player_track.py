@@ -104,11 +104,11 @@ def smooth_path(times, xs, default=0.5, max_speed=0.12):
     filled = [first if x is None else x for x in filled]
     # 3-point median kills one-frame jumps to another person
     med = [float(np.median(filled[max(0, i - 1):i + 2])) for i in range(len(filled))]
-    out = [med[0]]
+    out = [max(0.32, min(0.68, med[0]))]
     for i in range(1, len(med)):
         dt = max(1e-3, times[i] - times[i - 1])
         step = max(-max_speed * dt, min(max_speed * dt, med[i] - out[-1]))
-        out.append(out[-1] + step)
+        out.append(max(0.32, min(0.68, out[-1] + step)))
     return out
 
 

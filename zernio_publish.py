@@ -21,6 +21,25 @@ PLATFORMS = (
 )
 
 
+def load_env_fallback():
+    """Load variables from .env if present without external dependencies."""
+    env_file = Path(__file__).resolve().parent / ".env"
+    if env_file.is_file():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k not in os.environ and v:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+
+load_env_fallback()
+
+
 def load_metadata(path):
     with path.open(encoding="utf-8") as file:
         metadata = json.load(file)
@@ -132,8 +151,9 @@ def main():
         sys.exit(f"This clip already has a Zernio post ID ({metadata['zernio_post_id']}); check its status before retrying.")
     if not metadata.get("approved") and not args.unattended:
         sys.exit("Clip metadata is not approved. Review it, or configure unattended posting and pass --unattended.")
-    if args.unattended and os.environ.get("GTA_UNATTENDED_POSTS") != "1":
-        sys.exit("Set GTA_UNATTENDED_POSTS=1 in your private environment to enable unattended publishing.")
+    unattended_env = os.environ.get("CLIPFORGE_UNATTENDED_POSTS") or os.environ.get("GTA_UNATTENDED_POSTS")
+    if args.unattended and unattended_env != "1":
+        sys.exit("Set CLIPFORGE_UNATTENDED_POSTS=1 in your private environment to enable unattended publishing.")
     accounts = [(platform, os.environ.get(variable, "")) for platform, variable in PLATFORMS]
     accounts = [(platform, account) for platform, account in accounts if account]
     if args.publish and not accounts:
@@ -154,7 +174,7 @@ def main():
         status = error.response.status_code if error.response is not None else "unknown"
         sys.exit(f"Zernio returned HTTP {status}. Check the Zernio dashboard before retrying.")
     except requests.RequestException as error:
-        sys.exit(f"Zernio request failed ({type(error).__name__}). Check the Zernio dashboard before retrying.")
+        sys.exit(f"Zernio request failed ({error}). Check the Zernio dashboard before retrying.")
     print(f"Zernio accepted post {post['_id']} with status {post.get('status', 'accepted')}.")
 
 

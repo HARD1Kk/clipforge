@@ -15,28 +15,65 @@ import urllib.request
 API = "https://www.googleapis.com/youtube/v3/search"
 
 
-def find_streams(query, api_key, limit=25):
-    params = urllib.parse.urlencode({
-        "part": "snippet", "eventType": "live", "type": "video", "q": query,
-        "maxResults": min(max(limit, 1), 50), "order": "viewCount", "key": api_key,
-    })
-    request = urllib.request.Request(f"{API}?{params}", headers={"Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.load(response)
+def load_env_fallback():
+    """Load variables from .env if present without external dependencies."""
+    from pathlib import Path
+    env_file = Path(__file__).resolve().parent / ".env"
+    if env_file.is_file():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    if k not in os.environ and v:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+
+load_env_fallback()
+
+
+def find_streams(query, api_key, limit=100):
     streams = []
-    for item in payload.get("items", []):
-        snippet = item.get("snippet", {})
-        video_id = item.get("id", {}).get("videoId")
-        if not video_id:
-            continue
-        streams.append({
-            "title": html.unescape(snippet.get("title", "")),
-            "channel": snippet.get("channelTitle", ""),
-            "channel_id": snippet.get("channelId", ""),
-            "published_at": snippet.get("publishedAt"),
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-            "rank_signal": "YouTube search order=viewCount; not current live viewers",
-        })
+    page_token = None
+    target_count = min(max(limit, 1), 100)
+
+    while len(streams) < target_count:
+        fetch_n = min(50, target_count - len(streams))
+        query_dict = {
+            "part": "snippet", "eventType": "live", "type": "video", "q": query,
+            "maxResults": fetch_n, "order": "viewCount", "key": api_key,
+        }
+        if page_token:
+            query_dict["pageToken"] = page_token
+
+        params = urllib.parse.urlencode(query_dict)
+        request = urllib.request.Request(f"{API}?{params}", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+
+        for item in payload.get("items", []):
+            snippet = item.get("snippet", {})
+            video_id = item.get("id", {}).get("videoId")
+            if not video_id:
+                continue
+            streams.append({
+                "title": html.unescape(snippet.get("title", "")),
+                "channel": snippet.get("channelTitle", ""),
+                "channel_id": snippet.get("channelId", ""),
+                "published_at": snippet.get("publishedAt"),
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "rank_signal": "YouTube search order=viewCount; not current live viewers",
+            })
+            if len(streams) >= target_count:
+                break
+
+        page_token = payload.get("nextPageToken")
+        if not page_token or not payload.get("items"):
+            break
+
     return streams
 
 
@@ -48,7 +85,7 @@ def main():
             pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("query", nargs="?", default="GTA 6")
-    parser.add_argument("--max", type=int, default=25, help="candidate count (maximum 50)")
+    parser.add_argument("--max", type=int, default=100, help="candidate count (up to 100)")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     args = parser.parse_args()
     api_key = os.environ.get("YOUTUBE_API_KEY")

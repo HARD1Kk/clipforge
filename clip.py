@@ -619,12 +619,16 @@ def main():
                     help="fill (default): gameplay covers the full 9:16 screen, centered and shifted away from a side "
                          "facecam; fit: whole source in the middle over a blurred background")
     ap.add_argument("--crop", action="store_true", help="same as --layout fill (kept for old commands)")
+    ap.add_argument("--block-facecam", action="store_true", default=False,
+                    help="strictly block streamer facecams by locking crop to pure central gameplay")
     ap.add_argument("--moment-source", choices=("chat", "combined", "audio"), default="chat",
                     help="rank by chat reactions (default), combine chat with audio/speech, or use audio/speech only")
     ap.add_argument("--no-chat", action="store_true", help="disable live chat signals and use audio/speech scoring only")
     ap.add_argument("--spoken-language", choices=("auto", "en", "hi"), default="auto",
                     help="auto (default): detect, and lock to Hindi once the stream is clearly Hindi (Hinglish captions); "
                          "hi / en: force it for the whole stream")
+    ap.add_argument("--require-en-hi", action="store_true", default=False,
+                    help="strictly require English or Hindi; discard moments from other languages")
     ap.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
     ap.add_argument("--keep-minutes", type=int, default=30)
     ap.add_argument("--output-dir", default=None, help="override the output folder")
@@ -698,19 +702,27 @@ def main():
                     print("  no live chat messages for this chunk; using audio/speech instead")
             moments, words = pick_moments(c, a.clip_len, a.top, a.min_score, a.lead_in,
                                           chunk_chat, chunk_moment_source)
+            spoken_lang = getattr(words, "spoken_language", "unknown")
+            if getattr(a, "require_en_hi", False) and spoken_lang not in ("en", "hi"):
+                print(f"  skipping chunk: detected language '{spoken_lang}' is not English or Hindi")
+                continue
             for score, start in moments:
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                name = f"gta-{stamp}-{n_clips + 1}"
+                name = f"clip-{stamp}-{n_clips + 1}"
                 mp4 = os.path.join(out_dir, name + ".mp4")
                 layout = "fill" if a.crop else a.layout
                 crop_offset, source_roi = detect_smart_frame(c, start, a.clip_len) if layout == "fill" else (0.5, None)
                 smart_crop = layout == "fill"
                 pan_keys = None
                 if smart_crop and source_roi is None:
-                    from player_track import track_player
-                    pan_keys = track_player(c, start, a.clip_len)
-                    if pan_keys is None:                  # driving / cutscene: the car sits mid-frame
+                    if getattr(a, "block_facecam", False):
+                        pan_keys = None
                         crop_offset = 0.5
+                    else:
+                        from player_track import track_player
+                        pan_keys = track_player(c, start, a.clip_len)
+                        if pan_keys is None:                  # driving / cutscene: the car sits mid-frame
+                            crop_offset = 0.5
                 caption_margin_v = caption_margin_for_video(c, crop=smart_crop, source_roi=None if smart_crop else source_roi)
                 if cut(c, words, start, a.clip_len, mp4, who.get("credit"), crop=smart_crop,
                        crop_offset=crop_offset, source_roi=source_roi,
@@ -726,7 +738,7 @@ def main():
                         selection_signals = ["audio", "speech"]
                     with open(os.path.join(out_dir, name + ".json"), "w", encoding="utf-8") as meta:
                         json.dump({
-                            "video": name + ".mp4", "channel": "gta", "source_url": a.url or a.file,
+                            "video": name + ".mp4", "channel": "clip", "source_url": a.url or a.file,
                             "streamer": who["name"], "credit": who.get("credit"), "stream_title": title,
                             "score": score, "transcript": text,
                             "spoken_language": getattr(words, "spoken_language", "unknown"),
