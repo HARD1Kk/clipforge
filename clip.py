@@ -518,9 +518,9 @@ def pick_moments(chunk_path, clip_len, top, min_score, lead_in=6, chat_messages=
         audio_score = 0.45 * loud + 0.2 * min(density, 4.0) + 1.2 * reaction
         if reaction == 0:
             if spoken_lang == "hi":
-                audio_score *= 0.75 if density >= 1.0 else 0.55
+                audio_score *= 0.85 if density >= 1.0 else 0.55
             else:
-                audio_score *= 0.45
+                audio_score *= 0.80 if density >= 1.0 else 0.45
         if moment_source == "chat":
             score = 1.5 * chat_row["signal"] if chat_row else 0.0
         elif moment_source == "audio":
@@ -530,8 +530,9 @@ def pick_moments(chunk_path, clip_len, top, min_score, lead_in=6, chat_messages=
         cands.append((score, start, chat_row))
     cands.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
-    # Filter candidates meeting minimum audio threshold
-    initial_pool = [c for c in cands if c[0] >= min_score]
+    # Filter candidates meeting candidate pool threshold (allowing LLM boost to reach min_score)
+    candidate_gate = round(min_score / 1.4, 2) if (enable_llm and os.environ.get("GROQ_API_KEY")) else min_score
+    initial_pool = [c for c in cands if c[0] >= candidate_gate]
     if not initial_pool:
         return [], words
 
@@ -573,6 +574,8 @@ def pick_moments(chunk_path, clip_len, top, min_score, lead_in=6, chat_messages=
     for final_score, clip_start, clip_end, hook, reason, end_snap in pool_candidates:
         if len(chosen) >= top:
             break
+        if final_score < min_score:
+            continue
         if any(intervals_overlap(clip_start, clip_end, c[1], c[2]) for c in chosen):
             continue
         chosen.append((round(float(final_score), 2), float(clip_start), float(clip_end), hook, reason, end_snap))

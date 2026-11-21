@@ -131,7 +131,7 @@ def main():
     parser.add_argument("--max-seconds", type=int, default=600, help="Recording capture time in seconds (default: 600 = 10 mins)")
     parser.add_argument("--clip-len", type=int, default=30, help="Clip length in seconds (default: 30)")
     parser.add_argument("--top", type=int, default=2, help="Clips per chunk (default: 2)")
-    parser.add_argument("--min-score", type=float, default=3.0, help="Minimum moment score (default: 3.0)")
+    parser.add_argument("--min-score", type=float, default=2.0, help="Minimum moment score (default: 2.0)")
     parser.add_argument("--stream-url", help="Direct stream URL if you already have one")
     parser.add_argument("--publish-now", action="store_true", help="Automatically publish approved clips immediately via Zernio")
     args = parser.parse_args()
