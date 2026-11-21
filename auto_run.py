@@ -32,11 +32,13 @@ def load_env():
 
 load_env()
 
-def generate_viral_metadata(streamer, transcript, score, source_url, stream_title):
+def generate_viral_metadata(streamer, transcript, score, source_url, stream_title, hook=None):
     """Generate punchy, viral title, YouTube description, and Instagram caption using Groq LLM."""
     streamer_clean = streamer or "Streamer"
     groq_api_key = os.environ.get("GROQ_API_KEY")
     groq_model = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b")
+
+    hook_line = f"KEY MOMENT HOOK: \"{hook}\"\n" if hook else ""
 
     # 1. Try 100% LLM AI Generation via Groq
     if groq_api_key:
@@ -47,6 +49,7 @@ def generate_viral_metadata(streamer, transcript, score, source_url, stream_titl
                 f"Analyze this stream highlight and write high-CTR, click-worthy metadata.\n\n"
                 f"STREAMER: {streamer_clean}\n"
                 f"ORIGINAL STREAM: {stream_title or 'GTA 6 Live'}\n"
+                f"{hook_line}"
                 f"MOMENT HYPE SCORE: {score}/10\n"
                 f"TRANSCRIPT / WHAT WAS SAID:\n\"{transcript or '(Intense screams / gaming action without clear words)'}\"\n\n"
                 f"Return ONLY valid JSON with these exact keys:\n"
@@ -226,7 +229,8 @@ def main():
             data.get("transcript"),
             data.get("score"),
             data.get("source_url"),
-            data.get("stream_title")
+            data.get("stream_title"),
+            hook=data.get("hook")
         )
 
         data["title"] = title

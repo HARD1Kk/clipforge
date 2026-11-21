@@ -11,10 +11,37 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(HERE, "output")
 TEST_OUT = os.path.join(HERE, "test_out")
 WORK = os.path.join(HERE, "work")
+
+
+def load_env():
+    env_file = os.path.join(HERE, ".env")
+    if os.path.isfile(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip('"').strip("'")
+                        if k not in os.environ and v:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+
+load_env()
 DEFAULT_MAX_SECONDS = 0
-STRONG_REACTIONS = {"wow", "crazy", "insane", "shit", "fuck", "fucking", "damn", "unbelievable",
-                    "ridiculous", "nuts", "wild", "sick", "amazing", "brilliant"}
-GAME_EVENTS = {"crash", "crashed", "explode", "exploded", "boom", "chase", "chasing", "wreck", "wrecked"}
+STRONG_REACTIONS = {
+    "wow", "crazy", "insane", "shit", "fuck", "fucking", "damn", "unbelievable",
+    "ridiculous", "nuts", "wild", "sick", "amazing", "brilliant",
+    # Unambiguous Hindi / Hinglish reaction cues (no common English verbs or casual filler)
+    "bawaal", "bavaala", "gazab", "gajaba", "shabash", "shaabaash", "khatam", "khatma", "op"
+}
+GAME_EVENTS = {
+    "crash", "crashed", "explode", "exploded", "boom", "chase", "chasing", "wreck", "wrecked",
+    # Hindi / Hinglish game action cues
+    "thok", "thoka", "udaya"
+}
 REACTION_PHRASES = {
     ("oh", "my", "god"): 1.2, ("holy", "shit"): 1.5, ("holy", "crap"): 1.2,
     ("no", "way"): 1.4, ("what", "the", "hell"): 1.3, ("are", "you", "kidding"): 1.4,
@@ -149,6 +176,40 @@ def romanize_hindi(text):
     return "".join(result)
 
 
+_RAW_HINDI_PHRASES = {
+    "भाई ये क्या": 1.5,
+    "भाई ये क्या था": 1.7,
+    "क्या किया": 1.3,
+    "अरे यार": 1.3,
+    "खत्म टाटा": 1.4,
+    "ये क्या था": 1.5,
+    "गया गया": 1.2,
+    "मर गया": 1.3,
+    "तेरी तो": 1.4,
+    "खेल खत्म": 1.5,
+    "बाप रे": 1.3,
+    "बवाल है": 1.4,
+    "गजब भाई": 1.4,
+    "क्या बात": 1.2,
+}
+
+for _dev_text, _weight in _RAW_HINDI_PHRASES.items():
+    _tokens = tuple(re.sub(r"\W", "", romanize_hindi(w).lower()) for w in _dev_text.split())
+    _tokens = tuple(t for t in _tokens if t)
+    if _tokens:
+        REACTION_PHRASES[_tokens] = _weight
+
+# Also register familiar Latin-script transliterations
+for _latin_tuple, _weight in {
+    ("bhai", "ye", "kya"): 1.5, ("bhai", "ye", "kya", "tha"): 1.7,
+    ("kya", "kiya"): 1.3, ("arre", "yaar"): 1.3, ("khatam", "tata"): 1.4,
+    ("ye", "kya", "tha"): 1.5, ("gaya", "gaya"): 1.2, ("mar", "gaya"): 1.3,
+    ("teri", "to"): 1.4, ("khel", "khatam"): 1.5, ("baap", "re"): 1.3,
+    ("bawaal", "hai"): 1.4, ("kya", "baat"): 1.2,
+}.items():
+    REACTION_PHRASES[_latin_tuple] = _weight
+
+
 def contains_arabic_script(text):
     return any("\u0600" <= char <= "\u06ff" or "\u0750" <= char <= "\u077f"
                or "\u08a0" <= char <= "\u08ff" for char in text)
@@ -242,35 +303,224 @@ def select_clip_start(anchor, lead_in, clip_len, duration):
     return round(min(max(0.0, anchor - lead_in), latest), 2)
 
 
+def build_utterances(words, pause_threshold=0.65):
+    """Group word tuples (start, end, word) into coherent utterances split by pauses."""
+    if not words:
+        return []
+    utterances = []
+    curr_words = [words[0]]
+    for w in words[1:]:
+        if w[0] - curr_words[-1][1] >= pause_threshold:
+            text = " ".join(item[2] for item in curr_words)
+            utterances.append((curr_words[0][0], curr_words[-1][1], text, curr_words))
+            curr_words = [w]
+        else:
+            curr_words.append(w)
+    if curr_words:
+        text = " ".join(item[2] for item in curr_words)
+        utterances.append((curr_words[0][0], curr_words[-1][1], text, curr_words))
+    return utterances
+
+
+def snap_clip_boundaries(anchor, lead_in, duration, words, min_len=15.0, max_len=45.0, target_len=30.0):
+    """Select start and end times for a clip, snapping to natural speech pauses or word starts.
+    Returns (start, end, end_snap) where end_snap indicates which tier determined the end.
+    """
+    if duration <= min_len:
+        return 0.0, round(float(duration), 2), "duration_clamped"
+
+    raw_start = max(0.0, anchor - lead_in)
+    utterances = build_utterances(words)
+
+    # 1. Start selection: snap to utterance start or near word start
+    snapped_start = None
+    if utterances:
+        candidates = [u[0] for u in utterances if abs(u[0] - raw_start) <= 3.0]
+        if candidates:
+            snapped_start = min(candidates, key=lambda t: abs(t - raw_start))
+    if snapped_start is None and words:
+        near_words = [w[0] for w in words if abs(w[0] - raw_start) <= 2.0]
+        if near_words:
+            snapped_start = min(near_words, key=lambda t: abs(t - raw_start))
+    if snapped_start is None:
+        snapped_start = raw_start
+
+    start = max(0.0, min(float(snapped_start), max(0.0, duration - min_len)))
+
+    # 2. End selection: look for utterance or word ends in [min_end, max_end]
+    target_end = start + target_len
+    min_end = min(duration, start + min_len)
+    max_end = min(duration, start + max_len)
+
+    snapped_end = None
+    end_snap = "fallback"
+
+    # Tier 1: Look for natural utterance ends with pause >= 0.65s or sentence punctuation
+    if utterances:
+        valid_ends = [u[1] for u in utterances if min_end <= u[1] <= max_end]
+        if not valid_ends and words:
+            # If all speech in the chunk finishes slightly before min_end (>= 14s), snap to speech end
+            speech_ends = [u[1] for u in utterances if u[1] >= anchor and (u[1] - start) >= 14.0]
+            if speech_ends:
+                valid_ends = [max(speech_ends)]
+        if valid_ends:
+            after_peak = [t for t in valid_ends if t >= anchor]
+            candidates = after_peak if after_peak else valid_ends
+            snapped_end = min(candidates, key=lambda t: abs(t - target_end))
+            end_snap = "utterance_pause"
+
+    # Tier 2: Lower-pause fallback (pause >= 0.35s or comma/semicolon between words)
+    if snapped_end is None and words:
+        mid_pauses = []
+        for i in range(len(words) - 1):
+            w_curr, w_next = words[i], words[i + 1]
+            if min_end <= w_curr[1] <= max_end:
+                if (w_next[0] - w_curr[1] >= 0.35) or w_curr[2].endswith((",", ";")):
+                    mid_pauses.append(w_curr[1])
+        if mid_pauses:
+            after_peak = [t for t in mid_pauses if t >= anchor]
+            candidates = after_peak if after_peak else mid_pauses
+            snapped_end = min(candidates, key=lambda t: abs(t - target_end))
+            end_snap = "mid_pause"
+
+    # Tier 3: Nearest word end in range
+    if snapped_end is None and words:
+        valid_word_ends = [w[1] for w in words if min_end <= w[1] <= max_end]
+        if valid_word_ends:
+            after_peak = [t for t in valid_word_ends if t >= anchor]
+            candidates = after_peak if after_peak else valid_word_ends
+            snapped_end = min(candidates, key=lambda t: abs(t - target_end))
+            end_snap = "word_boundary"
+
+    if snapped_end is None:
+        snapped_end = min(duration, target_end)
+        end_snap = "fallback"
+
+    end = max(min_end, min(float(snapped_end), max_end))
+    return round(float(start), 2), round(float(end), 2), end_snap
+
+
+def intervals_overlap(s1, e1, s2, e2, min_overlap=5.0):
+    """Check if two time intervals overlap by more than min_overlap seconds."""
+    overlap = min(e1, e2) - max(s1, s2)
+    return overlap > min_overlap
+
+
+def evaluate_moment_with_llm(words, start, end):
+    """Re-rank candidate moments using Groq LLM based on narrative quality of dialogue.
+    Returns (multiplier, hook, reason). On timeout/rate-limit/no-dialogue, returns (1.0, None, None).
+    """
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        return 1.0, None, None
+
+    # Dialogue window slightly expanded around the candidate
+    window_words = [w for w in words if (start - 5.0) <= w[0] <= (end + 5.0)]
+    if len(window_words) < 5:
+        # Too little or no dialogue; let raw audio / visual signals drive this moment
+        return 1.0, None, None
+
+    utterances = build_utterances(window_words)
+    if not utterances:
+        return 1.0, None, None
+
+    lines = []
+    for i, (u_start, u_end, text, _) in enumerate(utterances, 1):
+        lines.append(f"[{i}] ({u_start:.1f}s - {u_end:.1f}s): \"{text}\"")
+    dialogue_block = "\n".join(lines)
+
+    prompt = (
+        "You are an expert short-form video editor analyzing candidate clips from a gaming livestream.\n"
+        "Here is the dialogue around a high-energy gameplay spike:\n\n"
+        f"{dialogue_block}\n\n"
+        "Evaluate if this dialogue contains an entertaining, meaningful micro-story (e.g. hilarious fail, "
+        "challenge setup, unexpected twist, hype clutch, or funny banter).\n"
+        "Return strictly valid JSON with these exact keys:\n"
+        "- is_meaningful: true if dialogue has actual story/entertainment value, false if disjointed noise/filler\n"
+        "- story_score: integer from 1 (boring filler) to 10 (viral masterpiece)\n"
+        "- hook: short punchy 4-8 word hook summarizing the moment\n"
+        "- reason: 1 concise sentence explaining why this moment works or fails"
+    )
+
+    import urllib.request
+    import json as _json
+
+    payload = _json.dumps({
+        "model": os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b"),
+        "messages": [
+            {"role": "system", "content": "You are a viral gaming video editor. Always output strictly valid JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.3,
+        "max_tokens": 350
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {groq_api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "ClipForge/1.0"
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=7) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+            content = data["choices"][0]["message"]["content"]
+            res = _json.loads(content)
+            is_meaningful = bool(res.get("is_meaningful", True))
+            story_score = max(1, min(10, int(res.get("story_score", 5))))
+            hook = res.get("hook")
+            reason = res.get("reason")
+            # Bounded adjustment: 0.6 + 0.08 * story_score
+            # Score 1 -> 0.68, Score 5 -> 1.00, Score 10 -> 1.40
+            multiplier = 0.6 + 0.08 * story_score
+            if not is_meaningful:
+                multiplier = min(multiplier, 0.75)
+            return round(multiplier, 3), hook, reason
+    except Exception as e:
+        print(f"  [Notice: Groq evaluation notice ({type(e).__name__}: {e}); using audio score]")
+        return 1.0, None, None
+
+
 def pick_moments(chunk_path, clip_len, top, min_score, lead_in=6, chat_messages=None,
-                 moment_source="combined"):
+                 moment_source="combined", enable_llm=True):
     audio = load_audio(chunk_path)
     if len(audio) < 16000:
         return [], []
     db = rms_series(audio)
     words = whisper_words(audio)
+    spoken_lang = getattr(words, "spoken_language", "unknown")
     hop = 0.25
     med = np.median(db); mad = np.median(np.abs(db - med)) + 1.0
     spike = (db - med) / mad
     dur = len(db) * hop
-    if dur < clip_len:
+    if dur < 20.0:
         return [], words
-    starts = np.arange(0, dur - clip_len + 0.1, 5.0)
-    chat_scores = score_chat_windows(chat_messages or [], starts.tolist(), clip_len) if chat_messages else []
+    step = 5.0
+    eval_len = min(clip_len, dur)
+    starts = np.arange(0, max(0.1, dur - eval_len + 0.1), step)
+    chat_scores = score_chat_windows(chat_messages or [], starts.tolist(), eval_len) if chat_messages else []
     chat_by_start = {round(row["start"], 3): row for row in chat_scores}
     cands = []
     for start in starts:
-        a, b = int(start / hop), int((start + clip_len) / hop)
+        a, b = int(start / hop), int((start + eval_len) / hop)
         seg = np.sort(spike[a:b])
         loud = seg[-max(3, len(seg) // 10):].mean()
-        ws = [w for w in words if start <= w[0] < start + clip_len]
-        density = len(ws) / clip_len
+        ws = [w for w in words if start <= w[0] < start + eval_len]
+        density = len(ws) / eval_len
         reaction = reaction_score(ws)
         chat_row = chat_by_start.get(round(float(start), 3))
         # Chat mode ranks by viewer reactions; speech and sound remain for captions and fallback.
         audio_score = 0.45 * loud + 0.2 * min(density, 4.0) + 1.2 * reaction
         if reaction == 0:
-            audio_score *= 0.45
+            if spoken_lang == "hi":
+                audio_score *= 0.75 if density >= 1.0 else 0.55
+            else:
+                audio_score *= 0.45
         if moment_source == "chat":
             score = 1.5 * chat_row["signal"] if chat_row else 0.0
         elif moment_source == "audio":
@@ -279,22 +529,53 @@ def pick_moments(chunk_path, clip_len, top, min_score, lead_in=6, chat_messages=
             score = audio_score + (0.85 * chat_row["signal"] if chat_row else 0.0)
         cands.append((score, start, chat_row))
     cands.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    chosen = []
-    for score, start, chat_row in cands:
-        if score < min_score or len(chosen) >= top:
-            continue
-        if any(abs(start - c[1]) < clip_len for c in chosen):
-            continue
-        a, b = int(start / hop), int((start + clip_len) / hop)
+
+    # Filter candidates meeting minimum audio threshold
+    initial_pool = [c for c in cands if c[0] >= min_score]
+    if not initial_pool:
+        return [], words
+
+    # Over-select distinct non-overlapping candidates for LLM re-ranking
+    pool_candidates = []
+    pool_target = max(top * 2, 4) if enable_llm else top
+    for score, start, chat_row in initial_pool:
+        a, b = int(start / hop), int((start + eval_len) / hop)
         peak = (a + int(np.argmax(spike[a:b]))) * hop
         if moment_source == "chat" and chat_row:
             peak = chat_row["peak_t"]
         elif moment_source == "combined" and chat_row and chat_row["signal"] >= 1.2 and chat_row["peak_chatters"] >= 2:
             peak = chat_row["peak_t"]
-        start = select_clip_start(peak, lead_in, clip_len, dur)
-        # snap start to the nearest word start within 2 s so we never cut mid-word
-        near = [w[0] for w in words if abs(w[0] - start) <= 2]
-        chosen.append((round(float(score), 2), float(min(near, key=lambda t: abs(t - start)) if near else start)))
+        clip_start, clip_end, end_snap = snap_clip_boundaries(peak, lead_in, dur, words, min_len=15.0, max_len=45.0, target_len=clip_len)
+
+        if any(intervals_overlap(clip_start, clip_end, c[1], c[2]) for c in pool_candidates):
+            continue
+
+        pool_candidates.append((score, clip_start, clip_end, None, None, end_snap))
+        if len(pool_candidates) >= pool_target:
+            break
+
+    # Re-rank candidates with Groq LLM if enabled
+    if enable_llm and os.environ.get("GROQ_API_KEY"):
+        speech_cands = [c for c in pool_candidates if len([w for w in words if (c[1] - 5) <= w[0] <= (c[2] + 5)]) >= 5]
+        if speech_cands:
+            print(f"  evaluating {len(speech_cands)} candidate moment(s) with Groq LLM...")
+        re_ranked = []
+        for score, clip_start, clip_end, _, _, end_snap in pool_candidates:
+            mult, hook, reason = evaluate_moment_with_llm(words, clip_start, clip_end)
+            final_score = round(float(score * mult), 2)
+            re_ranked.append((final_score, clip_start, clip_end, hook, reason, end_snap))
+        pool_candidates = re_ranked
+
+    # Re-sort candidates by LLM-adjusted score
+    pool_candidates.sort(key=lambda item: item[0], reverse=True)
+
+    chosen = []
+    for final_score, clip_start, clip_end, hook, reason, end_snap in pool_candidates:
+        if len(chosen) >= top:
+            break
+        if any(intervals_overlap(clip_start, clip_end, c[1], c[2]) for c in chosen):
+            continue
+        chosen.append((round(float(final_score), 2), float(clip_start), float(clip_end), hook, reason, end_snap))
     return chosen, words
 
 
@@ -706,12 +987,18 @@ def main():
             if getattr(a, "require_en_hi", False) and spoken_lang not in ("en", "hi"):
                 print(f"  skipping chunk: detected language '{spoken_lang}' is not English or Hindi")
                 continue
-            for score, start in moments:
+            for item in moments:
+                score, start = item[0], item[1]
+                end = item[2] if len(item) > 2 else (start + a.clip_len)
+                hook = item[3] if len(item) > 3 else None
+                reason = item[4] if len(item) > 4 else None
+                end_snap = item[5] if len(item) > 5 else "fallback"
+                actual_clip_len = round(end - start, 2)
                 stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
                 name = f"clip-{stamp}-{n_clips + 1}"
                 mp4 = os.path.join(out_dir, name + ".mp4")
                 layout = "fill" if a.crop else a.layout
-                crop_offset, source_roi = detect_smart_frame(c, start, a.clip_len) if layout == "fill" else (0.5, None)
+                crop_offset, source_roi = detect_smart_frame(c, start, actual_clip_len) if layout == "fill" else (0.5, None)
                 smart_crop = layout == "fill"
                 pan_keys = None
                 if smart_crop and source_roi is None:
@@ -720,27 +1007,32 @@ def main():
                         crop_offset = 0.5
                     else:
                         from player_track import track_player
-                        pan_keys = track_player(c, start, a.clip_len)
+                        pan_keys = track_player(c, start, actual_clip_len)
                         if pan_keys is None:                  # driving / cutscene: the car sits mid-frame
                             crop_offset = 0.5
                 caption_margin_v = caption_margin_for_video(c, crop=smart_crop, source_roi=None if smart_crop else source_roi)
-                if cut(c, words, start, a.clip_len, mp4, who.get("credit"), crop=smart_crop,
+                if cut(c, words, start, actual_clip_len, mp4, who.get("credit"), crop=smart_crop,
                        crop_offset=crop_offset, source_roi=source_roi,
                        caption_margin_v=caption_margin_v, layout=layout, pan_keys=pan_keys):
                     n_clips += 1
-                    text = " ".join(w[2] for w in words if start <= w[0] < start + a.clip_len)
-                    chat_summary = summarize_chat_window(chunk_chat, start, a.clip_len)
+                    text = " ".join(w[2] for w in words if start <= w[0] < end)
+                    chat_summary = summarize_chat_window(chunk_chat, start, actual_clip_len)
                     if chunk_moment_source == "chat":
                         selection_signals = ["live-chat"]
                     elif chunk_moment_source == "combined":
                         selection_signals = ["audio", "speech", "live-chat"]
                     else:
                         selection_signals = ["audio", "speech"]
+                    if hook:
+                        selection_signals.append("groq-semantic-story")
                     with open(os.path.join(out_dir, name + ".json"), "w", encoding="utf-8") as meta:
                         json.dump({
                             "video": name + ".mp4", "channel": "clip", "source_url": a.url or a.file,
                             "streamer": who["name"], "credit": who.get("credit"), "stream_title": title,
-                            "score": score, "transcript": text,
+                            "score": float(score), "start": float(start), "end": float(end), "duration": float(actual_clip_len),
+                            "end_snap": end_snap,
+                            "hook": hook, "llm_evaluation": reason,
+                            "transcript": text,
                             "spoken_language": getattr(words, "spoken_language", "unknown"),
                             "caption_language": getattr(words, "caption_language", "English"),
                             "caption_fallback_reason": getattr(words, "caption_fallback_reason", None),
@@ -763,7 +1055,8 @@ def main():
                             "instagram_caption": None, "hashtags": [], "post_at": None,
                             "approved": False, "posted": {}, "test": who["test"],
                         }, meta, indent=2, ensure_ascii=False)
-                    print(f"  clip {name}.mp4  score {score}")
+                    hook_str = f"  hook: \"{hook}\"" if hook else ""
+                    print(f"  clip {name}.mp4  score {score}  len {actual_clip_len}s  snap: {end_snap}{hook_str}")
             for old in glob.glob(os.path.join(wdir, "chunk_*.ts")):
                 if old in done and time.time() - os.path.getmtime(old) > a.keep_minutes * 60:
                     os.remove(old)

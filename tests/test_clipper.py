@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -12,7 +13,7 @@ from clip import (
     write_ass,
     build_video_filter, choose_crop_offset, choose_vertical_game_roi, gameplay_crop_offset, reaction_score,
     should_apply_smart_crop,
-    source_identity, select_clip_start,
+    source_identity, select_clip_start, snap_clip_boundaries, build_utterances, evaluate_moment_with_llm,
     DEFAULT_MAX_SECONDS, pick_moments, mask_word, ytdlp_cmd,
 )
 
@@ -102,11 +103,97 @@ class ClipperReleaseTests(unittest.TestCase):
         audio[60 * 16000:62 * 16000] = 0.8
         with patch('clip.load_audio', return_value=audio), patch('clip.whisper_words', return_value=[]):
             chosen, _ = pick_moments('unused.ts', clip_len=30, top=2, min_score=0, lead_in=6)
-        starts = [start for _, start in chosen]
+        starts = [start for _, start, *_ in chosen]
         self.assertEqual(len(starts), 2)
         self.assertEqual(len(set(starts)), 2)
         self.assertTrue(any(14 <= start <= 16 for start in starts), starts)
         self.assertTrue(any(54 <= start <= 56 for start in starts), starts)
+
+    def test_boundary_snapping_near_start_clamps_to_zero(self):
+        start, end, snap = snap_clip_boundaries(anchor=3.0, lead_in=6.0, duration=60.0, words=[])
+        self.assertEqual(start, 0.0)
+        self.assertGreaterEqual(end - start, 15.0)
+        self.assertLessEqual(end - start, 45.0)
+        self.assertEqual(snap, "fallback")
+
+    def test_boundary_snapping_near_end_clamps_to_duration(self):
+        start, end, snap = snap_clip_boundaries(anchor=58.0, lead_in=6.0, duration=60.0, words=[])
+        self.assertLessEqual(end, 60.0)
+        self.assertEqual(start, 45.0)  # clamped to duration - min_len (60 - 15)
+
+    def test_boundary_snapping_without_pauses_bounds_duration(self):
+        # Continuous words without any pause >= 0.65s
+        words = [(float(i), float(i + 0.4), f"word{i}") for i in range(50)]
+        start, end, snap = snap_clip_boundaries(anchor=25.0, lead_in=6.0, duration=60.0, words=words)
+        duration = end - start
+        self.assertGreaterEqual(duration, 15.0)
+        self.assertLessEqual(duration, 45.0)
+
+    def test_boundary_snapping_aligns_with_speech_pauses(self):
+        # Speech with a clear 1.5s pause between 14.0s and 15.5s (setup), and between 44.0s and 45.5s (punchline)
+        setup = [(10.0, 10.5, "Watch"), (10.6, 11.2, "this"), (11.3, 14.0, "stunt")]
+        # pause: 14.0 -> 15.5
+        action = [(15.5, 16.0, "Holy"), (16.1, 16.8, "shit"), (16.9, 20.0, "jumping")]
+        # peak around 21.0
+        punchline = [(40.0, 41.0, "I"), (41.1, 42.0, "cannot"), (42.1, 44.0, "believe")]
+        # pause: 44.0 -> 46.0
+        after = [(46.0, 48.0, "Next")]
+        words = setup + action + punchline + after
+        start, end, snap = snap_clip_boundaries(anchor=21.0, lead_in=6.0, duration=60.0, words=words)
+        # Raw start is 21 - 6 = 15.0. Nearest utterance starts are 10.0 and 15.5.
+        self.assertEqual(start, 15.5)
+        # Valid ends in [15.5 + 18, 15.5 + 45] = [33.5, 60.0]. The punchline ends at 44.0 with a pause!
+        self.assertEqual(end, 44.0)
+        self.assertEqual(round(end - start, 2), 28.5)
+        self.assertEqual(snap, "utterance_pause")
+
+    def test_hindi_reaction_score_fires_on_romanized_speech(self):
+        from clip import romanize_hindi
+        devanagari_sentence = "भाई ये क्या था"
+        words = [(float(i), float(i + 0.4), romanize_hindi(w)) for i, w in enumerate(devanagari_sentence.split())]
+        score = reaction_score(words)
+        self.assertGreaterEqual(score, 1.5)
+
+    def test_common_english_and_hindi_words_do_not_falsely_trigger_reaction(self):
+        words = [(0.0, 0.5, "where"), (0.6, 1.0, "are"), (1.1, 1.5, "you")]
+        self.assertEqual(reaction_score(words), 0.0)
+
+    def test_evaluate_moment_with_llm_handles_few_words(self):
+        words = [(1.0, 1.5, "hi")]
+        mult, hook, reason = evaluate_moment_with_llm(words, 0.0, 30.0)
+        self.assertEqual(mult, 1.0)
+        self.assertIsNone(hook)
+
+    def test_evaluate_moment_with_llm_graceful_on_failure_or_garbage(self):
+        words = [(float(i), float(i + 0.4), f"word{i}") for i in range(10)]
+        with patch.dict("os.environ", {"GROQ_API_KEY": "fake_key"}), \
+             patch("urllib.request.urlopen", side_effect=Exception("Network down")):
+            mult, hook, reason = evaluate_moment_with_llm(words, 0.0, 15.0)
+            self.assertEqual(mult, 1.0)
+            self.assertIsNone(hook)
+
+    def test_evaluate_moment_with_llm_applies_score_multiplier(self):
+        words = [(float(i), float(i + 0.4), f"word{i}") for i in range(10)]
+        fake_response = json.dumps({
+            "choices": [{"message": {"content": json.dumps({
+                "is_meaningful": True,
+                "story_score": 9,
+                "hook": "Insane Helicopter Stunt",
+                "reason": "Clear setup and funny payoff"
+            })}}]
+        }).encode("utf-8")
+
+        class MockResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return fake_response
+
+        with patch.dict("os.environ", {"GROQ_API_KEY": "fake_key"}), \
+             patch("urllib.request.urlopen", return_value=MockResp()):
+            mult, hook, reason = evaluate_moment_with_llm(words, 0.0, 15.0)
+            # 0.6 + 0.08 * 9 = 1.32
+            self.assertEqual(mult, 1.32)
+            self.assertEqual(hook, "Insane Helicopter Stunt")
 
 
 class CaptionAndDownloaderTests(unittest.TestCase):
